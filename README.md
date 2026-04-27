@@ -69,15 +69,22 @@ FHEM-Modul zur Anbindung der OpenRouter AI API – einem Multi-Provider-Gateway 
 
 ## Installation
 
-### Datei kopieren
+### Erstmalig installieren
 
-Kopiere `98_OpenRouter.pm` nach `/opt/fhem/FHEM/`
-
-### In FHEM aktivieren
+In der FHEM-Kommandozeile oder `fhem.cfg`:
 
 ```
-reload 98_OpenRouter
+update all https://raw.githubusercontent.com/ahlers2mi/FHEM-Gemini/main/controls_OpenRouter.txt
+shutdown restart
 ```
+
+### Für automatische Updates (zusammen mit `update all`)
+
+```
+update add https://raw.githubusercontent.com/ahlers2mi/FHEM-Gemini/main/controls_OpenRouter.txt
+```
+
+Danach wird das Modul bei jedem `update all` automatisch auf den neuesten Stand gebracht.
 
 ---
 
