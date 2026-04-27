@@ -55,7 +55,7 @@
 ##############################################################################
 
 # Versionshistorie:
-# 1.0.0 - 2026-04-27  Initiale Version basierend auf FHEM-Gemini 4.0.3
+# 1.0.0 - 2026-04-27  Initiale Version basierend auf FHEM-Gemini 4.1.1
 #                     - OpenRouter API Integration (OpenAI-kompatibel)
 #                     - Ultra-kompaktes Format für niedrigen Token-Verbrauch
 #                     - Function Calling für unterstützte Modelle
@@ -113,13 +113,20 @@ sub OpenRouter_Define {
     $hash->{CHAT}        = [];   # Chat-Verlauf als Array-Referenz
     $hash->{VERSION}     = '1.0.0';
 
-    readingsSingleUpdate($hash, 'state',             'initialized', 1);
-    readingsSingleUpdate($hash, 'response',          '-',           0);
-    readingsSingleUpdate($hash, 'chatHistory',       0,             0);
-    readingsSingleUpdate($hash, 'lastError',         '-',           0);
-    readingsSingleUpdate($hash, 'lastCommand',       '-',           0);
-    readingsSingleUpdate($hash, 'lastCommandResult', '-',           0);
-    readingsSingleUpdate($hash, 'lastAutomation',    '-',           0);
+    readingsSingleUpdate($hash, 'state',                'initialized', 1);
+    readingsSingleUpdate($hash, 'response',             '-',           0);
+    readingsSingleUpdate($hash, 'chatHistory',          0,             0);
+    readingsSingleUpdate($hash, 'lastError',            '-',           0);
+    readingsSingleUpdate($hash, 'lastCommand',          '-',           0);
+    readingsSingleUpdate($hash, 'lastCommandResult',    '-',           0);
+    readingsSingleUpdate($hash, 'lastAutomation',       '-',           0);
+    readingsSingleUpdate($hash, 'responseHTML',         '-',           0);
+    readingsSingleUpdate($hash, 'responsePlain',        '-',           0);
+    readingsSingleUpdate($hash, 'candidatesTokenCount', '-',           0);
+    readingsSingleUpdate($hash, 'promptTokenCount',     '-',           0);
+    readingsSingleUpdate($hash, 'totalTokenCount',      '-',           0);
+
+    
 
     addToAttrList($hash->{NAME} . "Comment:textField-long","OpenRouter");  
     
