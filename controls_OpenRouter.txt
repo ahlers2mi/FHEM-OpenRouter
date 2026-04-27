@@ -1,0 +1,1 @@
+UPD 2026-04-27_11:12:24 57533 FHEM/98_OpenRouter.pm
