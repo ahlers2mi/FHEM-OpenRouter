@@ -665,6 +665,7 @@ sub OpenRouter_BuildStaticDeviceContext {
     my @blacklist = OpenRouter_GetBlacklist($hash);
     
     my $context = "Smart-Home Geräte (Struktur):\n";
+    $context .= "name(alias)|type|R:readings|comment";
     
     for my $devName (@devices) {
         next unless exists $main::defs{$devName};
@@ -673,7 +674,7 @@ sub OpenRouter_BuildStaticDeviceContext {
         my $type  = $dev->{TYPE} // '?';
         
         $context .= $devName;
-        $context .= " ($alias)" if $alias && $alias ne $devName;
+        $context .= "($alias)" if $alias && $alias ne $devName;
         $context .= "|$type";
         
         if (exists $dev->{READINGS}) {
@@ -722,7 +723,8 @@ sub OpenRouter_BuildDynamicDeviceStatus {
         my $alias = AttrVal($devName, 'alias', $devName);
         my $state = ReadingsVal($devName, 'state', '?');
         
-        $status .= "$alias:$state";
+        $status .= "$devName:$state";
+        $status .= "name|state|reading1=x,reading2=y..";
         
         if (exists $dev->{READINGS}) {
             my @values;
@@ -744,9 +746,8 @@ sub OpenRouter_BuildDynamicDeviceStatus {
             }
             
             if (@values) {
-                $status .= "(" . join(',', @values);
+                $status .= "|" . join(',', @values);
                 $status .= "...+" . ($totalReadings - $maxReadings) if $truncated;
-                $status .= ")";
                 
                 if ($truncated) {
                     Log3 $name, 4, "OpenRouter ($name): $devName Readings gekürzt ($totalReadings -> $maxReadings)";
@@ -812,6 +813,7 @@ sub OpenRouter_BuildStaticControlContext {
     my @blacklist = OpenRouter_GetBlacklist($hash);
     
     my $context = "Steuerbare Geräte:\n";
+    $context .= "name(alias)|cmds|comment";
     
     for my $devName (@devices) {
         next unless exists $main::defs{$devName};
@@ -829,7 +831,7 @@ sub OpenRouter_BuildStaticControlContext {
         my $cmdsStr = @cmds ? join(',', @cmds) : '?';
         
         $context .= $devName;
-        $context .= " ($alias)" if $alias ne $devName;
+        $context .= "($alias)" if $alias ne $devName;
         $context .= "|$cmdsStr";
         
         my $aiComment = AttrVal($devName, $name . 'Comment', '');
