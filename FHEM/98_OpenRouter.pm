@@ -79,6 +79,7 @@ sub OpenRouter_Initialize {
     $hash->{SetFn}      = 'OpenRouter_Set';
     $hash->{GetFn}      = 'OpenRouter_Get';
     $hash->{AttrFn}     = 'OpenRouter_Attr';
+    $hash->{FW_detailFn} = 'OpenRouter_FW_detail';   # NEU: Widget-Hook
     $hash->{AttrList}   =
         'apiKey ' .
         'model ' .
@@ -94,6 +95,7 @@ sub OpenRouter_Initialize {
         'automationRoom ' .
         'systemPrompt:textField-long ' .
         'readingBlacklist:textField-long ' .
+        'readingFilter:textField-long ' .   # NEU
         $readingFnAttributes;
 
     return undef;
@@ -199,9 +201,28 @@ sub OpenRouter_Set {
         readingsSingleUpdate($hash, 'state', 'chat reset', 1);
         Log3 $name, 3, "OpenRouter ($name): Chat-Verlauf zurückgesetzt";
         return undef;
+        
+    } elsif ($cmd eq 'readingFilterToggle') {
+        # Aufruf: set <name> readingFilterToggle <device> <reading> enable|disable
+        return "Usage: set $name readingFilterToggle <device> <reading> enable|disable"
+            unless @args == 3;
+        my ($dev, $reading, $action) = @args;
+        OpenRouter_ToggleReadingFilter($hash, $dev, $reading, $action eq 'disable' ? 1 : 0);
+        return undef;
 
+    } elsif ($cmd eq 'collectReadings') {
+        # Manuell alle bekannten Readings neu einlesen
+        OpenRouter_CollectAllReadings($hash);
+        my $count = 0;
+        for my $dev (keys %{$hash->{helper}{knownReadings}}) {
+            $count += scalar keys %{$hash->{helper}{knownReadings}{$dev}};
+        }
+        readingsSingleUpdate($hash, 'state', "Collected $count readings", 1);
+        return undef;
     } else {
-        return "Unknown argument $cmd, choose one of ask:textField askWithImage:textField askAboutDevices:textField chat:textField control:textField resetChat:noArg";
+        return "Unknown argument $cmd, choose one of ask:textField askWithImage:textField " .
+               "askAboutDevices:textField chat:textField control:textField resetChat:noArg " .
+               "readingFilterToggle collectReadings:noArg";
     }
 }
 
@@ -570,6 +591,23 @@ sub OpenRouter_IsBlacklisted {
     return 0;
 }
 
+##############################################################################
+# ERSATZ für IsBlacklisted: kombiniert alte Blacklist + neuen readingFilter
+##############################################################################
+sub OpenRouter_IsFiltered {
+    my ($hash, $devName, $reading) = @_;
+    
+    # 1. Alte Blacklist (Wildcards, global)
+    my @blacklist = OpenRouter_GetBlacklist($hash);
+    return 1 if OpenRouter_IsFiltered($hash, $devName, $reading);
+    
+    # 2. Neuer readingFilter (gerätespezifisch, Whitelist-Inversion)
+    my %disabled = OpenRouter_ParseReadingFilter($hash);
+    return 1 if OpenRouter_IsReadingDisabled(\%disabled, $devName, $reading);
+    
+    return 0;
+}
+
 sub OpenRouter_GlobMatch {
     my ($pat, $str) = @_;
     return ($str eq $pat) unless index($pat, '*') >= 0;
@@ -730,7 +768,7 @@ sub OpenRouter_BuildDynamicDeviceStatus {
             
             for my $reading (sort keys %{$dev->{READINGS}}) {
                 next if $reading eq 'state';
-                next if OpenRouter_IsBlacklisted($reading, @blacklist);
+                next if OpenRouter_IsFiltered($hash, $devName, $reading);
                 
                 $totalReadings++;
                 
@@ -1247,7 +1285,7 @@ sub OpenRouter_ExecuteFunctionCall {
                 $stateResult .= "Readings:\n";
                 for my $reading (sort keys %{$dev->{READINGS}}) {
                     next if $reading eq 'state';
-                    next if OpenRouter_IsBlacklisted($reading, @blacklist);
+                    next if OpenRouter_IsFiltered($hash, $devName, $reading);
                     my $val = $dev->{READINGS}{$reading}{VAL} // '';
                     $stateResult .= "  $reading: $val\n";
                 }
