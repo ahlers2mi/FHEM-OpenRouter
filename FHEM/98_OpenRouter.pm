@@ -665,7 +665,7 @@ sub OpenRouter_BuildStaticDeviceContext {
     my @blacklist = OpenRouter_GetBlacklist($hash);
     
     my $context = "Smart-Home Geräte (Struktur):\n";
-    $context .= "name(alias)|type|R:readings|comment";
+    $context .= "name(alias)|type|R:readings|comment\n";
     
     for my $devName (@devices) {
         next unless exists $main::defs{$devName};
@@ -716,6 +716,7 @@ sub OpenRouter_BuildDynamicDeviceStatus {
     my $maxReadings  = AttrVal($name, 'maxReadingsPerDevice', 20);
     
     my $status = "Status:\n";
+    $status .= "name|state|reading1=x,reading2=y..\n";
     
     for my $devName (@devices) {
         next unless exists $main::defs{$devName};
@@ -724,7 +725,6 @@ sub OpenRouter_BuildDynamicDeviceStatus {
         my $state = ReadingsVal($devName, 'state', '?');
         
         $status .= "$devName:$state";
-        $status .= "name|state|reading1=x,reading2=y..";
         
         if (exists $dev->{READINGS}) {
             my @values;
@@ -813,7 +813,7 @@ sub OpenRouter_BuildStaticControlContext {
     my @blacklist = OpenRouter_GetBlacklist($hash);
     
     my $context = "Steuerbare Geräte:\n";
-    $context .= "name(alias)|cmds|comment";
+    $context .= "name(alias)|cmds|comment\n";
     
     for my $devName (@devices) {
         next unless exists $main::defs{$devName};
