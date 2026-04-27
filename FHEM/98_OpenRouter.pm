@@ -686,12 +686,9 @@ sub OpenRouter_BuildStaticDeviceContext {
         }
         
         my $aiComment = AttrVal($devName, $name . 'Comment', '');
-        my $comment   = AttrVal($devName, 'comment', '');
         
         if ($aiComment) {
             $context .= "|$aiComment";
-        } elsif ($comment) {
-            $context .= "|$comment";
         }
         
         $context .= "\n";
