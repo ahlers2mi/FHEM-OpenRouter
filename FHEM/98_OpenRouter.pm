@@ -919,8 +919,11 @@ sub OpenRouter_GetAutomationRoom {
     return '';
 }
 
+
 ##############################################################################
 # Unified Device Context (statisch, cachebar)
+# Änderung: Befehle werden als kurze Liste (nur Namen) ausgegeben,
+#           keine Slider-Werte, keine Peer-Listen → drastisch kürzerer Prompt
 ##############################################################################
 sub OpenRouter_BuildUnifiedDeviceContext {
     my ($hash) = @_;
@@ -944,7 +947,8 @@ sub OpenRouter_BuildUnifiedDeviceContext {
 
     my $context  = "FHEM Geräte:\n";
     $context    .= "name(alias)|type|ctrl|R:readings|cmds|comment\n";
-    $context    .= "ctrl=steuerbar ro=nur-lesen\n\n";
+    $context    .= "ctrl=steuerbar ro=nur-lesen\n";
+    $context    .= "Für vollständige Befehlsoptionen: get_device_commands(<name>)\n\n";
 
     for my $devName (sort keys %deviceRoles) {
         next unless exists $main::defs{$devName};
@@ -957,6 +961,7 @@ sub OpenRouter_BuildUnifiedDeviceContext {
         $context .= "($alias)" if $alias && $alias ne $devName;
         $context .= "|$type|$isCtrl";
 
+        # --- Readings (unverändert) ---
         if (exists $dev->{READINGS}) {
             my @readings = grep {
                 $_ ne 'state' &&
@@ -972,27 +977,125 @@ sub OpenRouter_BuildUnifiedDeviceContext {
             $context .= '|';
         }
 
+        # --- Befehle: nur eindeutige Namen, keine Werte/Optionen ---
         if ($deviceRoles{$devName}{control}) {
-            my $setListRaw = main::getAllSets($devName) // '';
-            my @cmds;
-            for my $entry (split(/\s+/, $setListRaw)) {
-                my ($cmdName) = split(/:/, $entry, 2);
-                next unless $cmdName;
-                next if OpenRouter_IsBlacklisted($cmdName, @blacklist);
-                push @cmds, $entry;
-            }
-            $context .= '|' . join(',', @cmds);
+            my $shortCmds = OpenRouter_GetShortCmds($devName, \@blacklist);
+            $context .= "|$shortCmds";
         } else {
             $context .= '|';
         }
 
+        # --- Optionaler AI-Kommentar ---
         my $aiComment = AttrVal($devName, $name . 'Comment', '');
         $context .= "|$aiComment" if $aiComment;
         $context .= "\n";
     }
 
     $context .= "\nNutze get_device_state() für aktuelle Werte.\n";
+    $context .= "Nutze get_device_commands() für vollständige Befehlsoptionen vor set_device().\n";
     return $context;
+}
+
+##############################################################################
+# Hilfsfunktion: Kurze Befehlsliste für einen Device
+# Gibt nur eindeutige Befehlsnamen zurück, keine Slider-Werte, keine Peers,
+# keine internen HomeMatic-Befehle
+##############################################################################
+sub OpenRouter_GetShortCmds {
+    my ($devName, $blacklistRef) = @_;
+
+    my $setListRaw = main::getAllSets($devName) // '';
+
+    # Patterns die grundsätzlich rausfliegen
+    my $skipPattern = qr/^(?:
+        HASH            |   # Perl-Referenz-Dump
+        noArg           |   # Wert, kein Befehl
+        # HomeMatic interne Befehle
+        peerSmart       |
+        peerIODev       |
+        peerBulk        |
+        regSet          |
+        regBulk         |
+        getRegRaw       |
+        deviceRename    |
+        fwUpdate        |
+        assignHmKey     |
+        getDevInfo      |
+        getVersion      |
+        getConfig       |
+        statusRequest   |
+        pair            |
+        unpair          |
+        pressS          |
+        pressL          |
+        press           |
+        tplSet_.*       |
+        eventS          |
+        eventL          |
+        clear           |
+        sign            |
+        raw             |
+        reset           |
+        deassociate     |
+        associate       |
+        # MAX interne
+        wakeUp          |
+        factoryReset    |
+        groupid         |
+        fakeShutterContact |
+        fakeWallThermostat |
+        saveConfig      |
+        weekProfile     |
+        restoreReadings |
+        restoreDevice   |
+        windowOpenDuration |
+        decalcification |
+        maxValveSetting |
+        valveOffset     |
+        boostValveposition |
+        measurementOffset  |
+        # Denon interne
+        rawCommand      |
+        channelVolume   |
+        FactoryDefaults |
+        tunerPresetMemory |
+        presetMemory    |
+        presetCall      |
+        favoriteList    |
+        usedInputs      |
+        # Velux interne
+        updateStatus    |
+        statusUpdateInterval |
+        updateCurrentPosition |
+        updateLimitation |
+        limitationClear |
+        limitationUpdateInterval |
+        limitationMin   |
+        limitationMax   |
+        execution       |
+        # Allgemein
+        intervals       |
+        blink
+    )$/x;
+
+    my %seen;
+    my @cmdNames;
+
+    for my $entry (split(/\s+/, $setListRaw)) {
+        my ($cmdName) = split(/:/, $entry, 2);
+        next unless defined $cmdName && $cmdName ne '';
+        next if $cmdName =~ $skipPattern;
+        next if $seen{$cmdName}++;
+
+        # Blacklist des Moduls prüfen (falls übergeben)
+        if ($blacklistRef && @$blacklistRef) {
+            next if OpenRouter_IsBlacklisted($cmdName, @$blacklistRef);
+        }
+
+        push @cmdNames, $cmdName;
+    }
+
+    return join(',', @cmdNames);
 }
 
 ##############################################################################
@@ -1015,6 +1118,23 @@ sub OpenRouter_GetReadTools {
             }
         }
     ];
+}
+
+# In BuildUnifiedDeviceContext: nur Befehlsnamen, keine Werte
+sub OpenRouter_GetShortCmds {
+    my ($devName) = @_;
+    my $setListRaw = main::getAllSets($devName) // '';
+    
+    my %seen;
+    my @cmdNames;
+    for my $entry (split(/\s+/, $setListRaw)) {
+        my ($cmdName) = split(/:/, $entry, 2);
+        next unless $cmdName && $cmdName ne '?';
+        next if $cmdName =~ /^(HASH|noArg)$/;
+        next if $seen{$cmdName}++;
+        push @cmdNames, $cmdName;
+    }
+    return join(',', @cmdNames);
 }
 
 ##############################################################################
@@ -1500,6 +1620,15 @@ sub OpenRouter_ExecuteFunctionCall {
 
         Log3 $name, 4, "OpenRouter ($name): get_device_state($device)";
         return $result;
+
+    # In ExecuteFunctionCall: neuer Handler
+    } elsif ($fcName eq 'get_device_commands') {
+        my $device = $args->{device} // '';
+        return "Fehler: Gerät '$device' nicht gefunden"
+            unless exists $main::defs{$device};
+    
+        my $setListRaw = main::getAllSets($device) // '';
+        return "Verfügbare Befehle für $device:\n$setListRaw";
 
     } elsif ($fcName eq 'set_device') {
         my $device  = $args->{device}  // '';
