@@ -654,32 +654,32 @@ sub OpenRouter_IsSafeCommand {
 ##############################################################################
 # readingFilter aktualisieren (global deaktiviert)
 ##############################################################################
-sub OpenRouter_ToggleReadingFilter {
-    my ($hash, $devName, $reading, $disable) = @_;
-    my $name = $hash->{NAME};
+sub OpenRouter_ParseReadingFilter {
+    my ($hash) = @_;
+    my $attr = AttrVal($hash->{NAME}, 'readingFilter', '');
 
-    my %disabled = OpenRouter_ParseReadingFilter($hash);
+    my %disabled;
+    return %disabled unless $attr;
 
-    if ($disable) {
-        $disabled{$devName}{$reading} = 1;
-    } else {
-        delete $disabled{$devName}{$reading};
-        delete $disabled{$devName} unless %{$disabled{$devName} // {}};
+    $attr =~ s/[\r\n\t]+/ /g;
+    $attr =~ s/\s+/ /g;
+    $attr =~ s/^\s+|\s+$//g;
+
+    my @tokens;
+    while ($attr =~ /([A-Za-z0-9_\-\.]+:[^\s]+)/g) {
+        push @tokens, $1;
     }
 
-    my @parts;
-    for my $dev (sort keys %disabled) {
-        my @readings = sort keys %{$disabled{$dev}};
-        push @parts, "$dev:" . join(',', @readings) if @readings;
+    for my $token (@tokens) {
+        next unless $token =~ /^([^:]+):(.+)$/;
+        my ($dev, $readings) = ($1, $2);
+        $readings =~ s/[,\s]+$//;
+        for my $r (split(/,/, $readings)) {
+            $r =~ s/^\s+|\s+$//g;
+            $disabled{$dev}{$r} = 1 if $r ne '';
+        }
     }
-
-    my $newAttr = join(' ', @parts);
-    if ($newAttr) {
-        CommandAttr(undef, "$name readingFilter $newAttr");
-    } else {
-        CommandDeleteAttr(undef, "$name readingFilter");
-    }
-    return;
+    return %disabled;
 }
 
 ##############################################################################
@@ -723,12 +723,29 @@ sub OpenRouter_ParseReadingFilterExtra {
     my %extra;
     return %extra unless $attr;
 
-    for my $token (split(/\s+/, $attr)) {
-        if ($token =~ /^([^:]+):(.+)$/) {
-            my ($dev, $readings) = ($1, $2);
-            for my $r (split(/,/, $readings)) {
-                $extra{$dev}{$r} = 1 if $r ne '';
-            }
+    # Alles normalisieren: Zeilenumbrüche, Tabs → Space
+    $attr =~ s/[\r\n\t]+/ /g;
+    $attr =~ s/\s+/ /g;
+    $attr =~ s/^\s+|\s+$//g;
+
+    # Strategie: Finde alle "devicename:readings" Blöcke
+    # Trennzeichen zwischen Blöcken ist ein Space VOR einem Token der ":" enthält
+    # Wir splitten direkt am Muster: optional-space WORD :
+    my @tokens;
+    while ($attr =~ /([A-Za-z0-9_\-\.]+:[^\s]+)/g) {
+        push @tokens, $1;
+    }
+
+    for my $token (@tokens) {
+        next unless $token =~ /^([^:]+):(.+)$/;
+        my ($dev, $readings) = ($1, $2);
+
+        # Trailing Komma/Space entfernen
+        $readings =~ s/[,\s]+$//;
+
+        for my $r (split(/,/, $readings)) {
+            $r =~ s/^\s+|\s+$//g;
+            $extra{$dev}{$r} = 1 if $r ne '';
         }
     }
     return %extra;
@@ -942,13 +959,26 @@ sub OpenRouter_BuildUnifiedDeviceContext {
     my @whitelist   = OpenRouter_GetEffectiveWhitelist($hash);
     my %wlSet       = map { $_ => 1 } @whitelist;
     my %extraActive = OpenRouter_ParseReadingFilterExtra($hash);
+    
+    # Temporär in BuildUnifiedDeviceContext nach ParseReadingFilterExtra:
+    Log3 $name, 5, "OpenRouter DEBUG extraActive: " . 
+    join(', ', map { "$_:" . join(',', keys %{$extraActive{$_}}) } keys %extraActive);
+    
     my @blacklist   = OpenRouter_GetBlacklist($hash);
     my $maxReadings = AttrVal($name, 'maxReadingsPerDevice', 20);
 
+#    my $context  = "FHEM Geräte:\n";
+#    $context    .= "name(alias)|type|ctrl|R:readings|cmds|comment\n";
+#    $context    .= "ctrl=steuerbar ro=nur-lesen\n";
+#    $context    .= "Für vollständige Befehlsoptionen: get_device_commands(<name>)\n\n";
+
     my $context  = "FHEM Geräte:\n";
-    $context    .= "name(alias)|type|ctrl|R:readings|cmds|comment\n";
+    $context    .= "Format: internalName(Alias/Beschreibung)|type|ctrl|R:readings|cmds\n";
+    $context    .= "WICHTIG: 'internalName' = exakter FHEM-Name für set-Befehle\n";
+    $context    .= "         'Alias' = Anzeigename den der User nennt\n";
+    $context    .= "Beispiel: MQTT2_Sonoff_S26_Switch_03(Stehlampe Esszimmer) → set MQTT2_Sonoff_S26_Switch_03 on\n";
     $context    .= "ctrl=steuerbar ro=nur-lesen\n";
-    $context    .= "Für vollständige Befehlsoptionen: get_device_commands(<name>)\n\n";
+    $context    .= "Für vollständige Befehlsoptionen: get_device_commands(<internalName>)\n\n";
 
     for my $devName (sort keys %deviceRoles) {
         next unless exists $main::defs{$devName};
@@ -1006,77 +1036,25 @@ sub OpenRouter_GetShortCmds {
 
     my $setListRaw = main::getAllSets($devName) // '';
 
-    # Patterns die grundsätzlich rausfliegen
-    my $skipPattern = qr/^(?:
-        HASH            |   # Perl-Referenz-Dump
-        noArg           |   # Wert, kein Befehl
-        # HomeMatic interne Befehle
-        peerSmart       |
-        peerIODev       |
-        peerBulk        |
-        regSet          |
-        regBulk         |
-        getRegRaw       |
-        deviceRename    |
-        fwUpdate        |
-        assignHmKey     |
-        getDevInfo      |
-        getVersion      |
-        getConfig       |
-        statusRequest   |
-        pair            |
-        unpair          |
-        pressS          |
-        pressL          |
-        press           |
-        tplSet_.*       |
-        eventS          |
-        eventL          |
-        clear           |
-        sign            |
-        raw             |
-        reset           |
-        deassociate     |
-        associate       |
-        # MAX interne
-        wakeUp          |
-        factoryReset    |
-        groupid         |
-        fakeShutterContact |
-        fakeWallThermostat |
-        saveConfig      |
-        weekProfile     |
-        restoreReadings |
-        restoreDevice   |
-        windowOpenDuration |
-        decalcification |
-        maxValveSetting |
-        valveOffset     |
-        boostValveposition |
-        measurementOffset  |
-        # Denon interne
-        rawCommand      |
-        channelVolume   |
-        FactoryDefaults |
-        tunerPresetMemory |
-        presetMemory    |
-        presetCall      |
-        favoriteList    |
-        usedInputs      |
-        # Velux interne
-        updateStatus    |
-        statusUpdateInterval |
-        updateCurrentPosition |
-        updateLimitation |
-        limitationClear |
-        limitationUpdateInterval |
-        limitationMin   |
-        limitationMax   |
-        execution       |
-        # Allgemein
-        intervals       |
-        blink
-    )$/x;
+    # Hash ist zuverlässiger als langer Regex mit /x
+    my %skipCmds = map { $_ => 1 } qw(
+        HASH noArg attrTemplate
+        peerSmart peerIODev peerBulk regSet regBulk getRegRaw
+        deviceRename fwUpdate assignHmKey getDevInfo getVersion
+        getConfig statusRequest pair unpair pressS pressL press
+        toggleDir inhibit sign raw reset clear eventS eventL
+        tplSet associate deassociate
+        wakeUp factoryReset groupid fakeShutterContact fakeWallThermostat
+        saveConfig weekProfile restoreReadings restoreDevice
+        windowOpenDuration decalcification maxValveSetting valveOffset
+        boostValveposition measurementOffset
+        rawCommand channelVolume FactoryDefaults
+        tunerPresetMemory presetMemory presetCall favoriteList usedInputs
+        updateStatus statusUpdateInterval updateCurrentPosition
+        updateLimitation limitationClear limitationMin limitationMax
+        limitationUpdateInterval execution
+        intervals blink
+    );
 
     my %seen;
     my @cmdNames;
@@ -1084,10 +1062,10 @@ sub OpenRouter_GetShortCmds {
     for my $entry (split(/\s+/, $setListRaw)) {
         my ($cmdName) = split(/:/, $entry, 2);
         next unless defined $cmdName && $cmdName ne '';
-        next if $cmdName =~ $skipPattern;
+        next if $skipCmds{$cmdName};
+        next if $cmdName =~ /^tplSet_/;   # Präfix-Pattern für dynamische Namen
         next if $seen{$cmdName}++;
 
-        # Blacklist des Moduls prüfen (falls übergeben)
         if ($blacklistRef && @$blacklistRef) {
             next if OpenRouter_IsBlacklisted($cmdName, @$blacklistRef);
         }
