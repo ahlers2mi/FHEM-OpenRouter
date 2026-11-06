@@ -74,14 +74,14 @@ FHEM-Modul zur Anbindung der OpenRouter AI API – einem Multi-Provider-Gateway 
 In der FHEM-Kommandozeile oder `fhem.cfg`:
 
 ```
-update all https://raw.githubusercontent.com/ahlers2mi/FHEM-Gemini/main/controls_OpenRouter.txt
-shutdown restart
+update all https://raw.githubusercontent.com/ahlers2mi/FHEM-OpenRouter/main/controls_OpenRouter.txt
+reload 98_OpenRouter
 ```
 
 ### Für automatische Updates (zusammen mit `update all`)
 
 ```
-update add https://raw.githubusercontent.com/ahlers2mi/FHEM-Gemini/main/controls_OpenRouter.txt
+update add https://raw.githubusercontent.com/ahlers2mi/FHEM-OpenRouter/main/controls_OpenRouter.txt
 ```
 
 Danach wird das Modul bei jedem `update all` automatisch auf den neuesten Stand gebracht.
