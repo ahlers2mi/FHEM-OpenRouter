@@ -101,8 +101,12 @@ define OpenRouterAI OpenRouter
 Kostenlos registrieren unter [openrouter.ai/keys](https://openrouter.ai/keys):
 
 ```
-attr OpenRouterAI apiKey sk-or-v1-DEIN-API-KEY
+set OpenRouterAI apiKey sk-or-v1-DEIN-API-KEY
 ```
+
+Ab v1.3.0 liegt der Key im FHEM-Keyvalue-Store und damit **nicht** in `fhem.cfg`
+(und nicht in einem Git-Export der Konfiguration). `attr apiKey` funktioniert
+weiter, ist aber veraltet; nach dem Umstieg `deleteattr OpenRouterAI apiKey`.
 
 ### 3. Modell wählen (optional)
 
@@ -220,6 +224,13 @@ set OpenRouterAI chat Wenn die Haustür aufgeht, schalte das Licht ein
 set OpenRouterAI chat Benachrichtige mich wenn die Temperatur über 25 Grad steigt
 ```
 
+**Grenzen (ab v1.3.0):** Automationen dürfen nur `set <Gerät> <Befehl>` auf ein
+steuerbares Gerät (`controlRoom`/`controlList`) ausführen. Für Benachrichtigungen
+also z. B. einen Melde-Dummy in den Steuer-Raum legen. Zeitangaben müssen
+`HH:MM[:SS]` oder `+HH:MM[:SS]` sein, Event-Muster `Gerät:Regex` ohne Leerzeichen.
+Perl-Code, Befehlsketten und andere FHEM-Befehle (`delete`, `attr`, ...) lehnt das
+Modul ab – egal, was das Modell schickt.
+
 ### Universeller Chat-Befehl (für Telegram-Integration)
 
 ```
@@ -243,7 +254,7 @@ get OpenRouterAI chatHistory
 
 | Attribut | Beschreibung | Standard |
 |---|---|---|
-| `apiKey` | OpenRouter API Key **(Pflicht)** | – |
+| `apiKey` | Veraltet: API Key als Attribut (steht in fhem.cfg). Besser `set <name> apiKey <key>` | – |
 | `model` | LLM Modell | `google/gemini-2.0-flash-exp` |
 | `maxHistory` | Maximale Anzahl gespeicherter Chat-Nachrichten | `20` |
 | `maxReadingsPerDevice` | Maximale Anzahl Readings pro Gerät im Status. Bei Überschreitung wird im Log protokolliert. | `20` |
@@ -256,6 +267,8 @@ get OpenRouterAI chatHistory
 | `controlList` | Komma-getrennte Liste der Geräte, die gesteuert werden dürfen **(Pflicht für `control`/`chat` mit Steuerung)** | – |
 | `controlRoom` | Komma-getrennte Raumliste; Geräte werden automatisch als steuerbar eingestuft | – |
 | `automationRoom` | Raum für automatisch angelegte AT/NOTIFY-Geräte | Erster Raum des OpenRouter-Devices |
+| `allowedSenders` | Komma-Liste der Absender, die steuern dürfen. Andere erkannte Absender bekommen ab v1.3.0 nur Lese-Funktionen (im Modul durchgesetzt). Nachrichten ohne Absender-Präfix gelten als erlaubt. | – |
+| `senderPattern` | Regex mit zwei Gruppen (Absender, Text) | `Name=Text`, `Name sagt: Text`, `Name: Text` |
 | `readingBlacklist` | Leerzeichen-getrennte Liste von Reading-Namen, die **nicht** übermittelt werden. Wildcards (`*`) werden unterstützt. | `attrTemplate associate R-* RegL_* associatedWith peerListRDate protLastRcv lastTimeSync lastcmd Heap LoadAvg Uptime Wifi_*` |
 
 ---
@@ -430,6 +443,8 @@ Alle Anfragen im OpenRouter-Dashboard: [openrouter.ai/activity](https://openrout
 
 | Version | Datum | Änderung |
 |---|---|---|
+| 1.3.0 | 2026-11-06 | **Sicherheit:** `time_spec`/`event_spec` geprüft, Automationen nur `set` auf steuerbare Geräte, einmaliger notify ohne Perl-String, `'`/`"` gesperrt, Lesen nur freigegebener Geräte, `allowedSenders` im Modul durchgesetzt. **Robustheit:** API-Key im Keyvalue-Store (`set apiKey`), `use JSON ()`, Umlaute nicht mehr doppelt kodiert, Antwort-Callback in `eval`, Define setzt Readings nicht mehr zurück, doppelte Subs stillgelegt (Befehlsfilter wirkt wieder), `readingFilterToggle` repariert, Commandref mit Attribut-Hilfe, Tests (`sh t/run.sh`) |
+| 1.2.0 | 2026-04-28 | readingExtraToggle, ParseReadingFilter, CSS im Modul |
 | 1.0.0 | 2026-04-27 | Initiale Version basierend auf FHEM-Gemini 4.0.3; OpenRouter API Integration (OpenAI-kompatibel); ultra-kompaktes Format für niedrigen Token-Verbrauch; Function Calling für unterstützte Modelle; AT/NOTIFY Support; Standard-Modell: `google/gemini-2.0-flash-exp` (kostenlos) |
 
 ---

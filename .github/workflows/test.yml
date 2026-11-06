@@ -1,0 +1,22 @@
+name: Test
+
+on:
+  push:
+    paths:
+      - 'FHEM/**'
+      - 't/**'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Keine Adresse des Code-Hosters im Modul (Anon-Spiegel)
+        run: |
+          ! grep -n "github\.com" FHEM/98_OpenRouter.pm
+
+      - name: Syntax und Funktionstests
+        run: sh t/run.sh

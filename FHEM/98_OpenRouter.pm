@@ -10,6 +10,34 @@
 #                     Fix: OpenRouter_ParseReadingFilter war nicht definiert
 #                     Fix: CSS im Modul (kein externes Theme nötig)
 #                     Fix: box-shadow verdeckte Reading-Namen
+# 1.3.0 - 2026-11-06  Sicherheit Function Calling:
+#                     - create_at_device/create_notify_device: time_spec und
+#                       event_spec werden geprüft (vorher ungeprüft -> Perl/
+#                       beliebige FHEM-Befehle möglich), Befehl nur noch
+#                       "set <Gerät> ..." auf steuerbare Geräte
+#                     - einmaliger notify ohne Perl-String (Ausbruch über ')
+#                     - ' und " in Befehlen gesperrt
+#                     - get_device_state/get_device_commands nur für Geräte
+#                       aus deviceRoom/deviceList/controlRoom/controlList
+#                     - nicht autorisierter Absender (allowedSenders): nur
+#                       Lese-Tools, Steuerung wird im Modul abgelehnt
+#                     - einmaliges at ohne kaputtes ";; delete" (FHEM löscht
+#                       at ohne * selbst)
+#                     Robustheit:
+#                     - doppelte Subs stillgelegt (ParseSender, ParseReadingFilter,
+#                       GetShortCmds - jetzt gilt die Fassung mit Befehls-Filter)
+#                     - use JSON () statt Import nach main
+#                     - Umlaute: FHEM-Bytes vor encode_json in Zeichen wandeln
+#                     - HTTP-Callback in eval (Fehler beenden FHEM nicht mehr)
+#                     - Define setzt Readings nicht mehr bei jedem Neustart zurück
+#                     - API-Key im Keyvalue-Store: set <name> apiKey <key>
+#                       (attr apiKey geht weiter, ist aber veraltet)
+#                     - Commandref mit Attribut-Ankern (Hilfe im attr-Dropdown)
+#                     - readingFilterToggle: fehlende Funktion ergänzt
+#
+# Autor:    ahlers2mi
+# Version:  v1.3.0
+# Lizenz:   GPL v2 oder höher (wie FHEM)
 #                     Fix: Schriftfarben für dunkles Theme
 
 package main;
@@ -17,7 +45,10 @@ package main;
 use strict;
 use warnings;
 use HttpUtils;
-use JSON;
+# Nichts nach main importieren (JSON::PP würde dort to_json überschreiben)
+use JSON ();
+use Encode ();
+use vars qw($readingFnAttributes %defs %attr $init_done);
 use MIME::Base64;
 
 ##############################################################################
@@ -145,6 +176,8 @@ sub OpenRouter_Initialize {
     $hash->{GetFn}       = 'OpenRouter_Get';
     $hash->{AttrFn}      = 'OpenRouter_Attr';
     $hash->{FW_detailFn} = 'OpenRouter_FW_detail';
+    $hash->{DeleteFn}    = 'OpenRouter_Delete';
+    $hash->{RenameFn}    = 'OpenRouter_Rename';
 
     $hash->{AttrList} =
     'apiKey ' .
@@ -182,22 +215,25 @@ sub OpenRouter_Define {
 
     my $name = $args[0];
     $hash->{NAME}    = $name;
-    $hash->{CHAT}    = [];
-    $hash->{VERSION} = '1.2.0';
+    $hash->{CHAT}     = [];
+    $hash->{VERSION}  = '1.3.0';
+    $hash->{FVERSION} = '98_OpenRouter.pm:v1.3.0';
 
+    # Readings nur anlegen, wenn sie fehlen: Define läuft bei jedem Neustart
+    # und bei defmod/modify - vorher stand danach immer "initialized" und
+    # totalTokenCount 0, die Nutzung war nicht mehr erkennbar.
+    my %init = (
+        state => 'initialized', response => '-', responsePlain => '-',
+        responseHTML => '-', chatHistory => 0, lastError => '-',
+        lastCommand => '-', lastCommandResult => '-', lastAutomation => '-',
+        promptTokenCount => 0, candidatesTokenCount => 0, totalTokenCount => 0,
+    );
     readingsBeginUpdate($hash);
-    readingsBulkUpdate($hash, 'state',                'initialized');
-    readingsBulkUpdate($hash, 'response',             '-');
-    readingsBulkUpdate($hash, 'responsePlain',        '-');
-    readingsBulkUpdate($hash, 'responseHTML',         '-');
-    readingsBulkUpdate($hash, 'chatHistory',          0);
-    readingsBulkUpdate($hash, 'lastError',            '-');
-    readingsBulkUpdate($hash, 'lastCommand',          '-');
-    readingsBulkUpdate($hash, 'lastCommandResult',    '-');
-    readingsBulkUpdate($hash, 'lastAutomation',       '-');
-    readingsBulkUpdate($hash, 'promptTokenCount',     0);
-    readingsBulkUpdate($hash, 'candidatesTokenCount', 0);
-    readingsBulkUpdate($hash, 'totalTokenCount',      0);
+    for my $r (sort keys %init) {
+        readingsBulkUpdate($hash, $r, $init{$r})
+            if (!defined(ReadingsVal($name, $r, undef)));
+    }
+    readingsBulkUpdate($hash, 'chatHistory', 0);     # der Verlauf selbst ist nach Define leer
     readingsEndUpdate($hash, 1);
 
     Log3 $name, 3, "OpenRouter ($name): Defined v$hash->{VERSION}";
@@ -210,6 +246,55 @@ sub OpenRouter_Define {
 sub OpenRouter_Undefine {
     my ($hash, $name) = @_;
     return undef;
+}
+
+##############################################################################
+# API-Key im Keyvalue-Store (nicht in fhem.cfg / Git-Export)
+##############################################################################
+sub OpenRouter_KeyName {
+    my ($name) = @_;
+    return "OpenRouter_${name}_apiKey";
+}
+
+sub OpenRouter_GetApiKey {
+    my ($hash) = @_;
+    my $name = $hash->{NAME};
+    my ($err, $key) = getKeyValue(OpenRouter_KeyName($name));
+    return $key if (!$err && defined($key) && $key ne '');
+    # Fallback: altes Attribut (veraltet)
+    my $attrKey = AttrVal($name, 'apiKey', '');
+    if ($attrKey ne '' && !$hash->{helper}{apiKeyAttrWarned}) {
+        $hash->{helper}{apiKeyAttrWarned} = 1;
+        Log3 $name, 2, "OpenRouter ($name): attr apiKey ist veraltet (steht in fhem.cfg) - "
+                     . "bitte 'set $name apiKey <key>' und danach 'deleteattr $name apiKey'";
+    }
+    return $attrKey;
+}
+
+sub OpenRouter_Delete {
+    my ($hash, $name) = @_;
+    setKeyValue(OpenRouter_KeyName($name), undef);
+    return undef;
+}
+
+sub OpenRouter_Rename {
+    my ($new, $old) = @_;
+    my ($err, $key) = getKeyValue(OpenRouter_KeyName($old));
+    if (!$err && defined($key)) {
+        setKeyValue(OpenRouter_KeyName($new), $key);
+        setKeyValue(OpenRouter_KeyName($old), undef);
+    }
+    return undef;
+}
+
+##############################################################################
+# FHEM-Strings (UTF-8-Bytes) in Perl-Zeichen wandeln, bevor sie in
+# JSON::encode_json gehen - sonst werden Umlaute doppelt kodiert.
+##############################################################################
+sub OpenRouter_Chars {
+    my ($s) = @_;
+    return $s if (!defined($s) || utf8::is_utf8($s));
+    return Encode::decode('UTF-8', $s);
 }
 
 ##############################################################################
@@ -275,6 +360,15 @@ sub OpenRouter_Set {
         OpenRouter_SendRequest($hash, join(' ', @args), undef, 1);
         return undef;
 
+    } elsif ($cmd eq 'apiKey') {
+        return "Usage: set $name apiKey <OpenRouter-API-Key>" unless @args == 1;
+        my $err = setKeyValue(OpenRouter_KeyName($name), $args[0]);
+        return "Fehler beim Speichern: $err" if $err;
+        readingsSingleUpdate($hash, 'state', 'apiKey gespeichert', 1);
+        return AttrVal($name, 'apiKey', '') ne ''
+            ? "API-Key gespeichert. attr apiKey wird nicht mehr gebraucht: deleteattr $name apiKey"
+            : undef;
+
     } elsif ($cmd eq 'resetChat') {
         $hash->{CHAT} = [];
         readingsSingleUpdate($hash, 'chatHistory', 0, 1);
@@ -314,7 +408,7 @@ sub OpenRouter_Set {
     } else {
         return "Unknown argument $cmd, choose one of " .
                "ask:textField askWithImage:textField askAboutDevices:textField " .
-               "chat:textField control:textField resetChat:noArg collectReadings:noArg";
+               "chat:textField control:textField resetChat:noArg collectReadings:noArg apiKey";
     }
 }
 
@@ -323,6 +417,10 @@ sub OpenRouter_Set {
 # Präfix parsen: Absender und Nachricht trennen
 # Unterstützt: "User=Nachricht", "User sagt: Nachricht", "User: Nachricht"
 ##############################################################################
+=pod
+
+AUSKOMMENTIERT (Claude 06.11.2026, v1.3.0): zweite, identische Definition weiter unten gilt (Perl nimmt die letzte).
+
 sub OpenRouter_ParseSender {
     my ($hash, $message) = @_;
     my $name = $hash->{NAME};
@@ -364,6 +462,9 @@ sub OpenRouter_ParseSender {
     # Kein Präfix erkannt
     return ('', $message);
 }
+
+=cut
+
 
 ##############################################################################
 # Get
@@ -611,6 +712,10 @@ JSEND
 # FIX 3: OpenRouter_ParseReadingFilter war im Original nicht definiert!
 # Parst das readingFilter-Attribut: "dev1:r1,r2 dev2:r3" → { dev => { r => 1 } }
 ##############################################################################
+=pod
+
+AUSKOMMENTIERT (Claude 06.11.2026, v1.3.0): überholt, die robustere Fassung direkt darunter gilt.
+
 sub OpenRouter_ParseReadingFilter {
     my ($hash) = @_;
     my $name = $hash->{NAME};
@@ -630,6 +735,9 @@ sub OpenRouter_ParseReadingFilter {
     return %disabled;
 }
 
+=cut
+
+
 ##############################################################################
 # Sicherheits-Check für set-Befehle
 ##############################################################################
@@ -637,7 +745,8 @@ sub OpenRouter_IsSafeCommand {
     my ($command) = @_;
 
     # Gefährliche Shell/FHEM-Injection Zeichen blockieren
-    my $dangerous = qr/[;|`\$\{\}\(\)\[\]<>\\]/;
+    # v1.3.0: zusätzlich ' und " (Ausbruch aus fhem('...')) sowie Zeilenumbrüche
+    my $dangerous = qr/[;|`\$\{\}\(\)\[\]<>\\'"\r\n]/;
 
     if ($command =~ $dangerous) {
         return (0, "Befehl enthält unerlaubte Zeichen: $command");
@@ -754,6 +863,37 @@ sub OpenRouter_ParseReadingFilterExtra {
 ##############################################################################
 # readingFilterExtra aktualisieren
 ##############################################################################
+##############################################################################
+# v1.3.0: fehlte - "set <name> readingFilterToggle" rief eine nicht definierte
+# Funktion auf (Undefined subroutine). Pflegt attr readingFilter analog zu Extra.
+##############################################################################
+sub OpenRouter_ToggleReadingFilter {
+    my ($hash, $devName, $reading, $disable) = @_;
+    my $name = $hash->{NAME};
+
+    my %dis = OpenRouter_ParseReadingFilter($hash);
+    if ($disable) {
+        $dis{$devName}{$reading} = 1;
+    } else {
+        delete $dis{$devName}{$reading};
+        delete $dis{$devName} unless %{$dis{$devName} // {}};
+    }
+
+    my @parts;
+    for my $dev (sort keys %dis) {
+        my @readings = sort keys %{$dis{$dev}};
+        push @parts, "$dev:" . join(',', @readings) if @readings;
+    }
+    my $newAttr = join(' ', @parts);
+    if ($newAttr) {
+        CommandAttr(undef, "$name readingFilter $newAttr");
+    } else {
+        CommandDeleteAttr(undef, "$name readingFilter");
+    }
+    delete $hash->{helper}{knownReadings};
+    return;
+}
+
 sub OpenRouter_ToggleReadingFilterExtra {
     my ($hash, $devName, $reading, $enable) = @_;
     my $name = $hash->{NAME};
@@ -1099,6 +1239,10 @@ sub OpenRouter_GetReadTools {
 }
 
 # In BuildUnifiedDeviceContext: nur Befehlsnamen, keine Werte
+=pod
+
+AUSKOMMENTIERT (Claude 06.11.2026, v1.3.0): überschrieb still die Fassung mit Befehls-Filter und blacklist (factoryReset, pair, fwUpdate ... landeten im Kontext). Jetzt gilt die obere Fassung.
+
 sub OpenRouter_GetShortCmds {
     my ($devName) = @_;
     my $setListRaw = main::getAllSets($devName) // '';
@@ -1115,6 +1259,9 @@ sub OpenRouter_GetShortCmds {
     return join(',', @cmdNames);
 }
 
+=cut
+
+
 ##############################################################################
 # Tools: lesen + steuern
 ##############################################################################
@@ -1130,7 +1277,7 @@ sub OpenRouter_GetControlTools {
                     type       => 'object',
                     properties => {
                         device  => { type => 'string', description => 'FHEM Gerätename (intern)' },
-                        command => { type => 'string', description => 'set-Befehl, z.B. on, off, 21' }
+                        command => { type => 'string', description => 'set-Befehl ohne Gerätenamen, z.B. on, off, desiredTemperature 21' }
                     },
                     required => ['device', 'command']
                 }
@@ -1145,8 +1292,8 @@ sub OpenRouter_GetControlTools {
                     type       => 'object',
                     properties => {
                         device_name => { type => 'string', description => 'Name des neuen AT-Geräts' },
-                        time_spec   => { type => 'string', description => 'HH:MM:SS, +HH:MM:SS, *HH:MM:SS' },
-                        command     => { type => 'string', description => 'FHEM set-Befehl' },
+                        time_spec   => { type => 'string', description => 'HH:MM[:SS] (Uhrzeit) oder +HH:MM[:SS] (in ...)' },
+                        command     => { type => 'string', description => 'set <Gerät> <Befehl> für ein steuerbares Gerät, z.B. set Lampe on' },
                         recurring   => { type => 'boolean', description => 'true=wiederkehrend' }
                     },
                     required => ['device_name', 'time_spec', 'command']
@@ -1162,8 +1309,8 @@ sub OpenRouter_GetControlTools {
                     type       => 'object',
                     properties => {
                         device_name => { type => 'string', description => 'Name des NOTIFY-Geräts' },
-                        event_spec  => { type => 'string', description => 'Gerätename:Event-Pattern' },
-                        command     => { type => 'string', description => 'FHEM set-Befehl' },
+                        event_spec  => { type => 'string', description => 'Gerätename:Event-Regex ohne Leerzeichen (Punkt statt Leerzeichen), z.B. Tuer:open' },
+                        command     => { type => 'string', description => 'set <Gerät> <Befehl> für ein steuerbares Gerät, z.B. set Lampe on' },
                         one_shot    => { type => 'boolean', description => 'true=einmalig' }
                     },
                     required => ['device_name', 'event_spec', 'command']
@@ -1234,9 +1381,9 @@ sub OpenRouter_SendRequest {
         return;
     }
 
-    my $apiKey = AttrVal($name, 'apiKey', '');
+    my $apiKey = OpenRouter_GetApiKey($hash);
     if (!$apiKey) {
-        readingsSingleUpdate($hash, 'lastError', 'Kein API Key gesetzt (attr apiKey)', 1);
+        readingsSingleUpdate($hash, 'lastError', "Kein API Key gesetzt (set $name apiKey <key>)", 1);
         readingsSingleUpdate($hash, 'state', 'error', 1);
         Log3 $name, 1, "OpenRouter ($name): Kein API Key konfiguriert!";
         return;
@@ -1280,7 +1427,7 @@ sub OpenRouter_SendRequest {
     }
 
     # Saubere Nachricht (ohne Präfix) in den Chat
-    push @contentParts, { type => 'text', text => $cleanMessage };
+    push @contentParts, { type => 'text', text => OpenRouter_Chars($cleanMessage) };
 
     # ------------------------------------------------------------------
     # Persistenten Chat-Verlauf aktualisieren
@@ -1316,6 +1463,7 @@ sub OpenRouter_SendRequest {
 
     # Absender-Kontext
     my $senderContext = '';
+    $hash->{helper}{readOnly} = 0;
     if ($sender) {
         my $allowedSenders = AttrVal($name, 'allowedSenders', '');
         if ($allowedSenders) {
@@ -1324,6 +1472,8 @@ sub OpenRouter_SendRequest {
                 $senderContext = "Der aktuelle Benutzer ist: $sender (autorisiert, darf Geräte steuern).";
             } else {
                 $senderContext = "Der aktuelle Benutzer ist: $sender (NICHT autorisiert - nur Auskünfte erteilen, KEINE Geräte steuern!).";
+                # v1.3.0: nicht nur bitten, sondern durchsetzen (siehe ExecuteFunctionCall)
+                $hash->{helper}{readOnly} = 1;
                 Log3 $name, 2, "OpenRouter ($name): Nicht autorisierter Absender: $sender";
             }
         } else {
@@ -1332,16 +1482,17 @@ sub OpenRouter_SendRequest {
     }
 
     my $fullSystem = join("\n\n", grep { $_ } ($systemPrompt, $senderContext, $deviceContext));
+    $hash->{helper}{senderContext} = $senderContext;   # für die Folgeanfrage mit Tool-Ergebnissen
 
     if ($fullSystem) {
-        unshift @sendMessages, { role => 'system', content => $fullSystem };
+        unshift @sendMessages, { role => 'system', content => OpenRouter_Chars($fullSystem) };
     }
 
     # ------------------------------------------------------------------
     # Tools bestimmen
     # ------------------------------------------------------------------
     my @controlDevices = OpenRouter_GetControlDevices($hash);
-    my $tools = @controlDevices
+    my $tools = (@controlDevices && !$hash->{helper}{readOnly})
         ? OpenRouter_GetControlTools()
         : OpenRouter_GetReadTools();
 
@@ -1354,7 +1505,7 @@ sub OpenRouter_SendRequest {
         tools    => $tools
     );
 
-    my $jsonBody = eval { encode_json(\%requestBody) };
+    my $jsonBody = eval { JSON::encode_json(\%requestBody) };
     if ($@) {
         readingsSingleUpdate($hash, 'lastError', "JSON Encode Fehler: $@", 1);
         readingsSingleUpdate($hash, 'state', 'error', 1);
@@ -1389,6 +1540,21 @@ sub OpenRouter_SendRequest {
 ##############################################################################
 sub OpenRouter_HandleResponse {
     my ($param, $err, $data) = @_;
+    # v1.3.0: ein die() im HttpUtils-Callback beendet FHEM - darum eval
+    my $hash = $param->{hash};
+    my $ok = eval { OpenRouter_HandleResponseRun($param, $err, $data); 1 };
+    if (!$ok) {
+        my $e = $@ // 'unbekannt';
+        $e =~ s/\s+$//;
+        Log3 $hash->{NAME}, 1, "OpenRouter ($hash->{NAME}): Fehler in der Antwortverarbeitung: $e";
+        readingsSingleUpdate($hash, 'lastError', "Interner Fehler: $e", 1);
+        readingsSingleUpdate($hash, 'state', 'error', 1);
+    }
+    return undef;
+}
+
+sub OpenRouter_HandleResponseRun {
+    my ($param, $err, $data) = @_;
     my $hash = $param->{hash};
     my $name = $hash->{NAME};
 
@@ -1403,7 +1569,7 @@ sub OpenRouter_HandleResponse {
     utf8::downgrade($data, 1);
     Log3 $name, 5, "OpenRouter ($name): Antwort raw: $data";
 
-    my $result = eval { decode_json($data) };
+    my $result = eval { JSON::decode_json($data) };
     if ($@) {
         readingsSingleUpdate($hash, 'lastError', "JSON Parse Fehler: $@", 1);
         readingsSingleUpdate($hash, 'state', 'error', 1);
@@ -1437,7 +1603,7 @@ sub OpenRouter_HandleResponse {
         my @fcResults;
         for my $tc (@{$message->{tool_calls}}) {
             my $fcName = $tc->{function}{name}                              // '';
-            my $args   = eval { decode_json($tc->{function}{arguments} // '{}') } // {};
+            my $args   = eval { JSON::decode_json($tc->{function}{arguments} // '{}') } // {};
             my $res    = OpenRouter_ExecuteFunctionCall($hash, $fcName, $args);
             push @fcResults, {
                 tool_call_id => $tc->{id},
@@ -1505,16 +1671,16 @@ sub OpenRouter_SendToolResults {
             role         => 'tool',
             tool_call_id => $res->{tool_call_id},
             name         => $res->{name},
-            content      => $res->{result}
+            content      => OpenRouter_Chars($res->{result})
         };
     }
 
-    my $apiKey  = AttrVal($name, 'apiKey',  '');
+    my $apiKey  = OpenRouter_GetApiKey($hash);
     my $model   = AttrVal($name, 'model',   'google/gemini-2.0-flash-exp');
     my $timeout = AttrVal($name, 'timeout', 30);
 
     my @controlDevices = OpenRouter_GetControlDevices($hash);
-    my $tools = @controlDevices
+    my $tools = (@controlDevices && !$hash->{helper}{readOnly})
         ? OpenRouter_GetControlTools()
         : OpenRouter_GetReadTools();
 
@@ -1527,10 +1693,11 @@ sub OpenRouter_SendToolResults {
     # System-Message NUR in die Send-Kopie
     my $systemPrompt  = AttrVal($name, 'systemPrompt', '');
     my $deviceContext = OpenRouter_BuildUnifiedDeviceContext($hash);
-    my $fullSystem    = join("\n\n", grep { $_ } ($systemPrompt, $deviceContext));
+    # v1.3.0: Absender-Hinweis auch in der Folgeanfrage
+    my $fullSystem    = join("\n\n", grep { $_ } ($systemPrompt, $hash->{helper}{senderContext}, $deviceContext));
 
     if ($fullSystem) {
-        unshift @sendMessages, { role => 'system', content => $fullSystem };
+        unshift @sendMessages, { role => 'system', content => OpenRouter_Chars($fullSystem) };
     }
 
     my %requestBody = (
@@ -1539,7 +1706,7 @@ sub OpenRouter_SendToolResults {
         tools    => $tools
     );
 
-    my $jsonBody = eval { encode_json(\%requestBody) };
+    my $jsonBody = eval { JSON::encode_json(\%requestBody) };
     if ($@) {
         readingsSingleUpdate($hash, 'lastError', "JSON Encode Fehler: $@", 1);
         readingsSingleUpdate($hash, 'state', 'error', 1);
@@ -1568,14 +1735,66 @@ sub OpenRouter_SendToolResults {
 ##############################################################################
 # Function Calls ausführen
 ##############################################################################
+##############################################################################
+# v1.3.0: Prüf-Helfer für Function Calls
+##############################################################################
+# Darf das Modell dieses Gerät lesen? (deviceRoom/deviceList/controlRoom/controlList)
+sub OpenRouter_IsVisibleDevice {
+    my ($hash, $device) = @_;
+    return 0 if (!$device || !exists $main::defs{$device});
+    my %ok = map { $_ => 1 } (OpenRouter_GetDeviceList($hash), OpenRouter_GetControlDevices($hash));
+    return $ok{$device} ? 1 : 0;
+}
+
+# "set <dev> <args>" oder "<dev> <args>" -> ("<dev> <args>", "") oder (undef, Fehler)
+sub OpenRouter_CheckSetCommand {
+    my ($hash, $command) = @_;
+    my ($safe, $reason) = OpenRouter_IsSafeCommand($command // '');
+    return (undef, $reason) if (!$safe);
+    my $c = $command;
+    $c =~ s/^\s+|\s+$//g;
+    $c =~ s/^set\s+//i;
+    my ($dev, $rest) = split(/\s+/, $c, 2);
+    return (undef, "Befehl muss 'set <Gerät> <Befehl>' sein: $command")
+        if (!defined($dev) || !defined($rest) || $rest eq '');
+    my %allowed = map { $_ => 1 } OpenRouter_GetControlDevices($hash);
+    return (undef, "Gerät '$dev' nicht steuerbar (controlList/controlRoom)")
+        if (!$allowed{$dev} || !exists $main::defs{$dev});
+    return ("$dev $rest", '');
+}
+
+# at-Zeitangabe: [*][+]HH:MM[:SS]
+sub OpenRouter_CheckTimeSpec {
+    my ($spec) = @_;
+    return ($spec // '') =~ /^\*?\+?\d{1,2}:\d{2}(?::\d{2})?$/ ? 1 : 0;
+}
+
+# notify-Muster: Gerät[:Event-Regex], kein Leerzeichen, keine Code-Zeichen,
+# Gerät muss existieren
+sub OpenRouter_CheckEventSpec {
+    my ($spec) = @_;
+    return "event_spec fehlt" if (!defined($spec) || $spec eq '');
+    return "event_spec darf keine Leerzeichen oder ; { } ' \" ` \\ enthalten: $spec"
+        if ($spec =~ /[\s;{}'"`\\]/);
+    my ($dev) = split(/:/, $spec, 2);
+    return "event_spec: Gerät '$dev' unbekannt" if (!$dev || !exists $main::defs{$dev});
+    return '';
+}
+
 sub OpenRouter_ExecuteFunctionCall {
     my ($hash, $fcName, $args) = @_;
     my $name = $hash->{NAME};
 
+    # v1.3.0: nicht autorisierter Absender -> nur lesen
+    if ($hash->{helper}{readOnly} && $fcName ne 'get_device_state' && $fcName ne 'get_device_commands') {
+        Log3 $name, 2, "OpenRouter ($name): $fcName abgelehnt (Absender nicht autorisiert)";
+        return "Fehler: Absender ist nicht autorisiert, Geräte zu steuern";
+    }
+
     if ($fcName eq 'get_device_state') {
         my $device = $args->{device} // '';
-        return "Fehler: Gerät '$device' nicht gefunden"
-            unless exists $main::defs{$device};
+        return "Fehler: Gerät '$device' nicht freigegeben"
+            unless OpenRouter_IsVisibleDevice($hash, $device);
 
         my $dev         = $main::defs{$device};
         my @whitelist   = OpenRouter_GetEffectiveWhitelist($hash);
@@ -1602,8 +1821,8 @@ sub OpenRouter_ExecuteFunctionCall {
     # In ExecuteFunctionCall: neuer Handler
     } elsif ($fcName eq 'get_device_commands') {
         my $device = $args->{device} // '';
-        return "Fehler: Gerät '$device' nicht gefunden"
-            unless exists $main::defs{$device};
+        return "Fehler: Gerät '$device' nicht freigegeben"
+            unless OpenRouter_IsVisibleDevice($hash, $device);
     
         my $setListRaw = main::getAllSets($device) // '';
         return "Verfügbare Befehle für $device:\n$setListRaw";
@@ -1650,27 +1869,32 @@ sub OpenRouter_ExecuteFunctionCall {
         return "Fehler: Ungültiger Gerätename '$deviceName'"
             unless $deviceName =~ /^[a-zA-Z0-9_\-]+$/;
 
-        my ($safe, $reason) = OpenRouter_IsSafeCommand($command);
-        if (!$safe) {
-            Log3 $name, 2, "OpenRouter ($name): Unsicherer Befehl blockiert: $reason";
+        # v1.3.0: Zeitangabe prüfen (vorher ungeprüft: "+00:00:05 {...}" lief als Perl)
+        return "Fehler: time_spec muss [*][+]HH:MM[:SS] sein: $timeSpec"
+            unless OpenRouter_CheckTimeSpec($timeSpec);
+        # v1.3.0: nur "set <steuerbares Gerät> ..." (vorher beliebiger FHEM-Befehl)
+        my ($setCmd, $reason) = OpenRouter_CheckSetCommand($hash, $command);
+        if (!defined($setCmd)) {
+            Log3 $name, 2, "OpenRouter ($name): at abgelehnt: $reason";
             return "Fehler: $reason";
         }
 
         my $uid = sprintf("%x%x%x", time(), rand(0xffff), rand(0xffff));
         $deviceName = "at_${name}_${uid}_${deviceName}";
 
-        my $res = CommandDefine(undef, "$deviceName at $timeSpec $command");
+        # Ohne * führt FHEM ein at einmal aus und löscht es selbst; das frühere
+        # ";; delete" kam als Teil des set-Befehls an und lief ins Leere.
+        $timeSpec =~ s/^\*//;
+        $timeSpec = "*$timeSpec" if ($recurring);
+
+        my $res = CommandDefine(undef, "$deviceName at $timeSpec set $setCmd");
         return "Fehler beim Anlegen: $res" if $res;
 
         my $room = OpenRouter_GetAutomationRoom($hash);
         CommandAttr(undef, "$deviceName room $room") if $room;
 
-        unless ($recurring) {
-            CommandModify(undef, "$deviceName $timeSpec $command;; delete $deviceName");
-            Log3 $name, 3, "OpenRouter ($name): AT-Device $deviceName angelegt (einmalig)";
-        } else {
-            Log3 $name, 3, "OpenRouter ($name): AT-Device $deviceName angelegt (wiederkehrend)";
-        }
+        Log3 $name, 3, "OpenRouter ($name): AT-Device $deviceName angelegt ("
+                     . ($recurring ? 'wiederkehrend' : 'einmalig') . "): $timeSpec set $setCmd";
 
         my $auto = "AT: $deviceName";
         utf8::encode($auto) if utf8::is_utf8($auto);
@@ -1685,18 +1909,28 @@ sub OpenRouter_ExecuteFunctionCall {
 
         return "Fehler: Ungültiger Gerätename '$deviceName'"
             unless $deviceName =~ /^[a-zA-Z0-9_\-]+$/;
-        my ($safe, $reason) = OpenRouter_IsSafeCommand($command);
-        if (!$safe) {
-            Log3 $name, 2, "OpenRouter ($name): Unsicherer Befehl blockiert: $reason";
+        # v1.3.0: Muster prüfen (vorher ungeprüft: Leerzeichen schob Code in den
+        # Befehlsteil) und nur "set <steuerbares Gerät> ..." zulassen
+        my $specErr = OpenRouter_CheckEventSpec($eventSpec);
+        if ($specErr) {
+            Log3 $name, 2, "OpenRouter ($name): notify abgelehnt: $specErr";
+            return "Fehler: $specErr";
+        }
+        my ($setCmd, $reason) = OpenRouter_CheckSetCommand($hash, $command);
+        if (!defined($setCmd)) {
+            Log3 $name, 2, "OpenRouter ($name): notify abgelehnt: $reason";
             return "Fehler: $reason";
         }
 
         my $uid = sprintf("%x%x%x", time(), rand(0xffff), rand(0xffff));
         $deviceName = "n_${name}_${uid}_${deviceName}";
 
+        # v1.3.0: kein Perl-String mehr ({ fhem('$command') } liess sich über '
+        # verlassen). Befehlskette direkt: CommandDefine bekommt den Text roh,
+        # notify trennt beim Ausführen am einfachen ;
         my $finalCommand = $oneShot
-            ? "{ fhem('$command');; fhem('delete $deviceName') }"
-            : $command;
+            ? "set $setCmd; delete $deviceName"
+            : "set $setCmd";
 
         my $res = CommandDefine(undef, "$deviceName notify $eventSpec $finalCommand");
         return "Fehler beim Anlegen: $res" if $res;
@@ -1842,31 +2076,114 @@ sub OpenRouter_EscapeMarkdownV2Plain {
 =item summary_DE OpenRouter AI Anbindung fuer FHEM mit Function Calling und Reading-Filter
 =begin html
 
-<a name="OpenRouter"></a>
+<a id="OpenRouter"></a>
 <h3>OpenRouter</h3>
 <ul>
-  FHEM Modul zur Anbindung der OpenRouter AI API.<br>
-  Unterstützt Claude, GPT-4, Gemini und viele weitere Modelle.<br><br>
+  FHEM-Modul für die OpenRouter-API (ein Zugang, viele Modelle: Claude, GPT, Gemini, DeepSeek ...).
+  Fragen beantworten, Bilder auswerten, Geräte per Function Calling steuern und einfache
+  Automationen (at/notify) anlegen.<br><br>
 
-  <b>Define</b><br>
-  <ul><code>define &lt;name&gt; OpenRouter</code></ul><br>
-
-  <b>Set</b><br>
+  <b>Sicherheit (ab v1.3.0)</b>
   <ul>
-    <li><b>ask</b> &lt;Frage&gt;</li>
-    <li><b>askWithImage</b> &lt;Pfad&gt; &lt;Frage&gt;</li>
-    <li><b>askAboutDevices</b> [&lt;Frage&gt;]</li>
-    <li><b>chat</b> &lt;Nachricht&gt;</li>
-    <li><b>control</b> &lt;Anweisung&gt;</li>
-    <li><b>resetChat</b></li>
-    <li><b>collectReadings</b></li>
-  </ul><br>
+    <li>Gesteuert werden nur Geräte aus <code>controlRoom</code>/<code>controlList</code>, gelesen nur
+      Geräte aus <code>deviceRoom</code>/<code>deviceList</code> und den steuerbaren.</li>
+    <li>Automationen sind auf <code>set &lt;steuerbares Gerät&gt; ...</code> beschränkt; Zeitangabe und
+      Event-Muster werden geprüft, Perl-Code und Befehlsketten sind gesperrt.</li>
+    <li>Absender, die nicht in <code>allowedSenders</code> stehen, bekommen nur Lese-Funktionen –
+      das Modul lehnt Steuerbefehle selbst ab, nicht nur das Modell.</li>
+    <li>Der API-Key liegt im Keyvalue-Store (<code>set &lt;name&gt; apiKey</code>), nicht in fhem.cfg.</li>
+  </ul>
+  <br>
 
-  <b>Reading-Filter Widget</b><br>
+  <a id="OpenRouter-define"></a>
+  <b>Define</b>
+  <ul><code>define &lt;name&gt; OpenRouter</code></ul>
+  <br>
+
+  <a id="OpenRouter-set"></a>
+  <b>Set</b>
   <ul>
-    Detailseite zeigt Checkboxen für alle bekannten Readings.<br>
-    Aktivierte Extras werden in <code>readingFilterExtra</code> gespeichert.<br>
-    Das Widget ist theme-unabhängig (CSS im Modul eingebettet).
+    <li><a id="OpenRouter-set-apiKey"></a><b>apiKey</b> &lt;key&gt;<br>
+      Speichert den OpenRouter-API-Key im Keyvalue-Store (nicht in fhem.cfg, nicht im Git-Export).
+      Danach <code>deleteattr &lt;name&gt; apiKey</code>.</li>
+    <li><a id="OpenRouter-set-ask"></a><b>ask</b> &lt;Frage&gt;<br>
+      Frage ohne Gerätekontext.</li>
+    <li><a id="OpenRouter-set-askWithImage"></a><b>askWithImage</b> &lt;Pfad&gt; &lt;Frage&gt;<br>
+      Frage zu einem Bild (Vision-Modell nötig).</li>
+    <li><a id="OpenRouter-set-askAboutDevices"></a><b>askAboutDevices</b> [&lt;Frage&gt;]<br>
+      Frage mit Gerätekontext.</li>
+    <li><a id="OpenRouter-set-chat"></a><b>chat</b> &lt;Nachricht&gt;<br>
+      Universeller Befehl mit Gerätekontext und – wenn steuerbare Geräte gesetzt sind – Steuerung.
+      Ein Präfix <code>Name=Text</code> (oder <code>senderPattern</code>) nennt den Absender.</li>
+    <li><a id="OpenRouter-set-control"></a><b>control</b> &lt;Anweisung&gt;<br>
+      Wie chat, verlangt aber <code>controlRoom</code>/<code>controlList</code>.</li>
+    <li><a id="OpenRouter-set-resetChat"></a><b>resetChat</b><br>
+      Chat-Verlauf löschen.</li>
+    <li><a id="OpenRouter-set-collectReadings"></a><b>collectReadings</b><br>
+      Readings aller Kontext-Geräte für das Filter-Widget einsammeln.</li>
+  </ul>
+  <br>
+
+  <a id="OpenRouter-get"></a>
+  <b>Get</b>
+  <ul>
+    <li><a id="OpenRouter-get-chatHistory"></a><b>chatHistory</b><br>
+      Chat-Verlauf anzeigen.</li>
+    <li><a id="OpenRouter-get-debugContext"></a><b>debugContext</b><br>
+      Den Gerätekontext anzeigen, der an das Modell geht.</li>
+  </ul>
+  <br>
+
+  <a id="OpenRouter-attr"></a>
+  <b>Attribute</b>
+  <ul>
+    <li><a id="OpenRouter-attr-apiKey"></a><b>apiKey</b><br>
+      Veraltet: API-Key als Attribut (steht damit in fhem.cfg). Besser <code>set &lt;name&gt; apiKey</code>;
+      der Keyvalue-Store hat Vorrang.</li>
+    <li><a id="OpenRouter-attr-model"></a><b>model</b><br>
+      OpenRouter-Modell, z. B. <code>deepseek/deepseek-v3.2</code> (Default <code>google/gemini-2.0-flash-exp</code>).</li>
+    <li><a id="OpenRouter-attr-maxHistory"></a><b>maxHistory</b><br>
+      Maximale Anzahl Nachrichten im Verlauf (Default 20).</li>
+    <li><a id="OpenRouter-attr-maxReadingsPerDevice"></a><b>maxReadingsPerDevice</b><br>
+      Höchstzahl Readings je Gerät im Kontext.</li>
+    <li><a id="OpenRouter-attr-timeout"></a><b>timeout</b><br>
+      HTTP-Timeout in Sekunden (Default 30).</li>
+    <li><a id="OpenRouter-attr-disable"></a><b>disable</b> 0|1<br>
+      1 = keine Anfragen.</li>
+    <li><a id="OpenRouter-attr-disableHistory"></a><b>disableHistory</b> 0|1<br>
+      1 = nur die aktuelle Nachricht senden.</li>
+    <li><a id="OpenRouter-attr-deviceList"></a><b>deviceList</b><br>
+      Komma-Liste lesbarer Geräte (Kontext).</li>
+    <li><a id="OpenRouter-attr-deviceRoom"></a><b>deviceRoom</b><br>
+      Komma-Liste von Räumen; deren Geräte sind lesbar (Kontext).</li>
+    <li><a id="OpenRouter-attr-controlList"></a><b>controlList</b><br>
+      Komma-Liste steuerbarer Geräte.</li>
+    <li><a id="OpenRouter-attr-controlRoom"></a><b>controlRoom</b><br>
+      Komma-Liste von Räumen; deren Geräte sind steuerbar.</li>
+    <li><a id="OpenRouter-attr-automationRoom"></a><b>automationRoom</b><br>
+      Raum für vom Modell angelegte at/notify (Default: erster Raum des Geräts).</li>
+    <li><a id="OpenRouter-attr-systemPrompt"></a><b>systemPrompt</b><br>
+      System-Anweisung für das Modell. Achtung: geht bei jeder Anfrage an den Anbieter.</li>
+    <li><a id="OpenRouter-attr-readingBlacklist"></a><b>readingBlacklist</b><br>
+      Readings (Wildcards), die nie in den Kontext gehen.</li>
+    <li><a id="OpenRouter-attr-readingFilter"></a><b>readingFilter</b><br>
+      Global abgeschaltete Readings je Gerät (<code>dev:r1,r2 ...</code>), gepflegt über das Widget.</li>
+    <li><a id="OpenRouter-attr-readingWhitelist"></a><b>readingWhitelist</b><br>
+      Reading-Namen, die grundsätzlich in den Kontext dürfen (Leerzeichen-Liste).</li>
+    <li><a id="OpenRouter-attr-readingFilterExtra"></a><b>readingFilterExtra</b><br>
+      Zusätzlich freigegebene Readings je Gerät (<code>dev:r1,r2 ...</code>), gepflegt über das Widget.</li>
+    <li><a id="OpenRouter-attr-senderPattern"></a><b>senderPattern</b><br>
+      Regex mit zwei Gruppen (Absender, Text) zum Zerlegen der Nachricht.</li>
+    <li><a id="OpenRouter-attr-allowedSenders"></a><b>allowedSenders</b><br>
+      Komma-Liste der Absender, die steuern dürfen. Andere erkannte Absender bekommen nur
+      Lese-Funktionen. Nachrichten ohne erkannten Absender (direkt aus FHEM) gelten als erlaubt.</li>
+  </ul>
+  <br>
+
+  <b>Reading-Filter Widget</b>
+  <ul>
+    Die Detailseite zeigt Checkboxen für alle bekannten Readings; Extras landen in
+    <code>readingFilterExtra</code>. Das CSS ist im Modul eingebettet.
   </ul>
 </ul>
 
